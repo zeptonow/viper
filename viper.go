@@ -24,6 +24,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"github.com/mitchellh/mapstructure"
 	"io"
 	"log/slog"
 	"os"
@@ -36,7 +37,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/afero"
 	"github.com/spf13/cast"
 	"github.com/spf13/pflag"
@@ -188,6 +188,8 @@ type Viper struct {
 
 	experimentalFinder     bool
 	experimentalBindStruct bool
+
+	kvMutex sync.RWMutex
 }
 
 // New returns an initialized Viper instance.
@@ -201,7 +203,11 @@ func New() *Viper {
 	v.parents = []string{}
 	v.override = make(map[string]any)
 	v.defaults = make(map[string]any)
+
+	v.kvMutex.Lock()
 	v.kvstore = make(map[string]any)
+	v.kvMutex.Unlock()
+
 	v.pflags = make(map[string]FlagValue)
 	v.env = make(map[string][]string)
 	v.aliases = make(map[string]string)
@@ -1237,7 +1243,10 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) any {
 	}
 
 	// K/V store next
+	v.kvMutex.RLock()
+	defer v.kvMutex.RUnlock()
 	val = v.searchMap(v.kvstore, path)
+
 	if val != nil {
 		return val
 	}
@@ -1397,10 +1406,14 @@ func (v *Viper) registerAlias(alias, key string) {
 				delete(v.config, alias)
 				v.config[key] = val
 			}
+
+			v.kvMutex.Lock()
 			if val, ok := v.kvstore[alias]; ok {
 				delete(v.kvstore, alias)
 				v.kvstore[key] = val
 			}
+			v.kvMutex.Unlock()
+
 			if val, ok := v.defaults[alias]; ok {
 				delete(v.defaults, alias)
 				v.defaults[key] = val
@@ -1847,7 +1860,11 @@ func (v *Viper) AllKeys() []string {
 	m = v.mergeFlatMap(m, castMapFlagToMapInterface(v.pflags))
 	m = v.mergeFlatMap(m, castMapStringSliceToMapInterface(v.env))
 	m = v.flattenAndMergeMap(m, v.config, "")
+
+	v.kvMutex.Lock()
 	m = v.flattenAndMergeMap(m, v.kvstore, "")
+	v.kvMutex.Unlock()
+
 	m = v.flattenAndMergeMap(m, v.defaults, "")
 
 	// convert set of paths to list
@@ -2025,7 +2042,11 @@ func (v *Viper) DebugTo(w io.Writer) {
 	fmt.Fprintf(w, "Override:\n%#v\n", v.override)
 	fmt.Fprintf(w, "PFlags:\n%#v\n", v.pflags)
 	fmt.Fprintf(w, "Env:\n%#v\n", v.env)
+
+	v.kvMutex.RLock()
 	fmt.Fprintf(w, "Key/Value Store:\n%#v\n", v.kvstore)
+	v.kvMutex.RUnlock()
+
 	fmt.Fprintf(w, "Config:\n%#v\n", v.config)
 	fmt.Fprintf(w, "Defaults:\n%#v\n", v.defaults)
 }
